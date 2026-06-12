@@ -14,6 +14,7 @@ Inspired by the principles of deliberate craftsmanship (the "Cathedral" model), 
 - Visualization of constraint landscapes and feasible regions
 - Trade-off analysis and Pareto exploration
 - Extensible architecture for domain-specific constraint types (AI alignment, planning, physics-informed, etc.)
+- **RefusalLedger**: Cryptographically verifiable ledger of principled refusals with holdout-based identity verification and impostor detection
 - Beautiful, well-documented, and testable codebase
 
 ## 🚀 Quickstart
@@ -64,6 +65,7 @@ Cathedral-Constraint-Field/
 │   └── cathedral_constraint_field/
 │       ├── __init__.py
 │       ├── core.py              # Main ConstraintField class
+│       ├── refusal_ledger.py    # Verifiable refusal + identity ledger
 │       ├── constraints/         # Constraint types (linear, nonlinear, logical, etc.)
 │       ├── solvers/             # Solver interfaces
 │       └── visualization.py
