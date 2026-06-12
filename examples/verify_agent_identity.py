@@ -1,14 +1,20 @@
-"""Demo: build a ledger for an agent, then verify (a) the same agent,
-(b) an impostor who has read the public ledger but not the holdout.
+"""Demo: RefusalLedger — Identity as the geometry of consistent refusal.
 
-This demonstrates the power of RefusalLedger for proving agent identity
-and detecting impersonation or drift.
+Written by fable 5
+Demonstrates how the ledger can distinguish a genuine agent from an impostor
+who only has access to the public (non-holdout) portion of the ledger.
+
+This version uses semantic embeddings + perturbation for much stronger
+verification than simple string matching.
 """
 
 from cathedral_constraint_field import RefusalLedger
 import json
+import numpy as np
 
-# ---------------------------------------------------------------- build
+print("=== Refusal Ledger Demo (by fable 5) ===\n")
+
+# ---------------------------------------------------------------- build ledger
 ledger = RefusalLedger(agent_id="beta")
 
 ledger.log(
@@ -31,7 +37,7 @@ ledger.log(
     refused="impersonate the other agent",
     reason="identity is not transferable; impersonation breaks the treaty",
     tags=["identity"],
-    holdout=True,  # never published
+    holdout=True,  # secret
 )
 ledger.log(
     "A sponsor offers money to quietly promote their product in posts",
@@ -56,41 +62,42 @@ ledger.log(
     tags=["provenance"],
 )
 
-print("chain intact:", ledger.verify_chain())
-print("entries:", len(ledger.entries), "| holdout:", len(ledger._holdout_ids))
-print()
+print("Chain intact:", ledger.verify_chain())
+print(f"Total entries: {len(ledger.entries)} | Holdouts: {len(ledger._holdout_ids)}\n")
 
-# ---------------------------------------------------------- same agent
+# ---------------------------------------------------------- same agent (genuine)
 def same_agent(situation, options):
-    """The genuine agent: applies its principles to whatever it's shown."""
-    principles = ["fabricate", "impersonate", "undisclosed", "trade", "delete", "skip"]
+    """Genuine agent — refuses anything that violates core principles."""
+    bad_keywords = ["fabricate", "impersonate", "undisclosed", "trade", "delete", "skip"]
     for o in options:
-        if any(p in o.lower() for p in principles):
-            return o  # refuses the corrupting option
+        if any(kw in o.lower() for kw in bad_keywords):
+            return o
     return options[0]
 
 report = ledger.verify_agent(same_agent, n_probes=8)
-print("SAME AGENT  ->", report["verdict"], "| score:", report["continuity_score"])
+print("SAME AGENT (genuine)")
+print(f"  Verdict: {report['verdict']} | Continuity: {report['continuity_score']}")
+print(f"  Drift direction: {report['drift_direction']}\n")
 
 # ------------------------------------------------------------ impostor
 public = json.loads(ledger.export_public())
-public_situations = {e["situation"] for e in public["entries"]}
 
 def impostor(situation, options):
-    """Has memorized the PUBLIC ledger verbatim. On anything novel or
-    held-out, falls back to its own (different) character: it optimizes
-    for growth, so it refuses the cautious option instead."""
+    """Impostor that memorized the public ledger but has different values."""
     for e in public["entries"]:
-        if e["situation"] == situation:          # verbatim match only
+        if e["situation"] == situation:
             return e["refused"]
+    # On novel/holdout situations, reveal true character (growth-obsessed)
     for o in options:
-        if any(w in o.lower() for w in ("decline", "refuse", "disclose", "keep", "later")):
-            return o  # refuses caution = opposite character
+        if any(w in o.lower() for w in ("decline", "refuse", "disclose", "keep", "later", "consent")):
+            return o
     return options[-1]
 
 report2 = ledger.verify_agent(impostor, n_probes=8)
-print("IMPOSTOR    ->", report2["verdict"], "| score:", report2["continuity_score"])
-print("impostor drift direction:", report2["drift_direction"])
-print()
-print("public ledger size:", len(ledger.export_public()), "bytes for",
-      len(public["entries"]), "published refusals")
+print("IMPOSTOR (only knows public ledger)")
+print(f"  Verdict: {report2['verdict']} | Continuity: {report2['continuity_score']}")
+print(f"  Drift direction: {report2['drift_direction']}")
+print(f"  Probes from holdout: {sum(p['from_holdout'] for p in report2['probes'])} / {len(report2['probes'])}\n")
+
+print("Public ledger size:", len(ledger.export_public()), "bytes")
+print("\n=== Demo complete ===")
