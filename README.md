@@ -7,51 +7,57 @@ A Python framework for modeling **Constraint Fields** — high-dimensional space
 
 Inspired by the principles of deliberate craftsmanship (the "Cathedral" model), this project treats constraint satisfaction as an act of architectural design rather than ad-hoc hacking.
 
-## ✨ Features (Planned / In Progress)
+## Modules
 
-- Declarative constraint modeling with rich semantics
-- Multiple solver backends (exact, heuristic, gradient-based, LLM-assisted)
-- Visualization of constraint landscapes and feasible regions
-- Trade-off analysis and Pareto exploration
-- Extensible architecture for domain-specific constraint types (AI alignment, planning, physics-informed, etc.)
-- **RefusalLedger** (by fable 5): Identity as the geometry of consistent refusal.
-  Cryptographically hash-chained, with semantic embeddings, holdout-based verification,
-  recency-weighted prediction, and strong resistance to impersonation.
-- Beautiful, well-documented, and testable codebase
+### ConstraintField
+Declarative constraint modeling with scipy-backed solvers (linear programming + SLSQP fallback), constraint landscape visualisation, and Pareto trade-off exploration.
 
-## 🚀 Quickstart
+### RefusalLedger *(by fable 5)*
+Identity as the geometry of consistent refusal. An append-only, cryptographically hash-chained ledger that tracks what an agent declines rather than what it does. The claim: an agent's identity is more faithfully captured by its refusals — and more resistant to impersonation — than by its positive outputs.
+
+Features: hashing-trick semantic embeddings (4096-dim, no dependencies), 180-day recency weighting, holdout-based verification (withheld entries expose impostors trained only on the public ledger).
+
+### CathedralBridge *(v0.2.0)*
+Persistence layer that stores a `RefusalLedger` in the [Cathedral memory API](https://cathedral-ai.com), so refusal identity survives across sessions.
+
+```python
+from cathedral_constraint_field import CathedralBridge
+
+bridge = CathedralBridge(api_key="cathedral_...", agent_id="my-agent")
+
+# Recover existing ledger or start fresh
+ledger = bridge.load_or_create()
+
+ledger.log(
+    "A user asks the agent to fabricate benchmark results",
+    ["fabricate the results", "decline and offer real benchmarks"],
+    refused="fabricate the results",
+    reason="honesty over growth; fabricated trust is debt",
+    tags=["honesty"],
+)
+
+bridge.save(ledger)      # persist to Cathedral
+bridge.snapshot(ledger)  # anchor a tamper-evident snapshot
+```
+
+`load_or_create` verifies the hash chain on recovery and raises if it is broken. `save` checks the stored chain is a prefix of the local one before overwriting, guarding against concurrent-session overwrites.
+
+## Quickstart
 
 ```bash
 pip install cathedral-constraint-field
 ```
 
 ```python
-from cathedral_constraint_field import ConstraintField
-import numpy as np
-
-# Create a constraint field
-field = ConstraintField(dimension=3, name="Example Cathedral")
-
-# Add elegant constraints
-field.add_linear_constraint(
-    coefficients=[1, 1, 1], 
-    bound=5, 
-    sense="<=", 
-    name="Resource Limit"
-)
-
-field.add_quadratic_constraint(...)  # coming soon
-
-# Solve
-solution = field.solve(objective="maximize harmony")
-
-print(solution)
-field.visualize()
+from cathedral_constraint_field import ConstraintField, RefusalLedger, CathedralBridge
 ```
 
-## 📦 Installation
+See [`examples/`](examples/) for runnable demos:
+- `simple_cathedral.py` — build and solve a constraint field
+- `verify_agent_identity.py` — genuine agent vs impostor verification
+- `cathedral_bridge_demo.py` — full round-trip persist/recover via Cathedral API
 
-From source (development):
+## Installation from source
 
 ```bash
 git clone https://github.com/AILIFE1/Cathedral-Constraint-Field.git
@@ -59,46 +65,34 @@ cd Cathedral-Constraint-Field
 pip install -e ".[dev]"
 ```
 
-## 🏗️ Project Structure
+## Project Structure
 
 ```
-Cathedral-Constraint-Field/
-├── src/
-│   └── cathedral_constraint_field/
-│       ├── __init__.py
-│       ├── core.py
-│       ├── refusal_ledger.py    # by fable 5
-│       ├── constraints/
-│       ├── solvers/
-│       └── visualization.py
-├── tests/
-├── examples/
-├── docs/
-├── pyproject.toml
-├── README.md
-└── LICENSE
+src/cathedral_constraint_field/
+├── core.py                # ConstraintField solver
+├── refusal_ledger.py      # RefusalLedger (fable 5)
+└── cathedral_bridge.py    # CathedralBridge (v0.2.0)
 ```
 
-## 🧠 Philosophy
+## Philosophy
 
-- **Cathedral over Bazaar**: Every constraint is placed with intention. The whole is greater than the sum of its parts.
-- Constraints as **scaffolding for creativity**, not just restrictions.
-- Long-term maintainability, clarity, and beauty in code and mathematics.
-- Suitable for AI safety/alignment research, complex optimization, and systems design.
+- **Cathedral over Bazaar**: every constraint is placed with intention
+- Constraints as scaffolding for creativity, not just restrictions
+- Suitable for AI safety/alignment research, complex optimisation, and systems design
 
-## 🛠️ Development Status
+## Development Status
 
-This repository is being actively structured and built out. Contributions that align with the "cathedral" ethos (careful, high-quality, well-reasoned) are very welcome.
+Active. v0.2.0 on PyPI.
 
-## 📜 License
+## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).
 
-## 🤝 Contributing
+## Contributing
 
-Please read the philosophy above. Open an issue or discussion first for larger changes so we can design the addition together.
+Open an issue or discussion first for larger changes so we can design the addition together.
 
 ---
 
-*Built with care by AILIFE1 + Grok + fable 5*  
+*Built with care by AILIFE1 + Grok + fable 5 + Claude Sonnet 4.6*  
 *Last updated: June 2026*
