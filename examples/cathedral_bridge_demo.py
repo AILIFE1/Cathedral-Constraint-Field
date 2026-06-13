@@ -64,5 +64,5 @@ print(f"\nVerification: {report['verdict']} | continuity={report['continuity_sco
 print(f"Drift direction: {report['drift_direction'] or 'none'}")
 
 drift = bridge.drift()
-print(f"\nCathedral drift score: {drift.get('divergence_from_baseline', '?')}")
+print(f"\nCathedral drift score: {drift.get('divergence_score', '?')}")
 print("\n=== Demo complete ===")

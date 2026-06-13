@@ -26,17 +26,24 @@ from typing import Optional
 
 from .refusal_ledger import RefusalLedger
 
-_BASE = "https://cathedral-ai.com/api"
-_MEMORY_CATEGORY = "refusal_ledger"
-_MEMORY_IMPORTANCE = 8  # high — identity-critical
-_SEARCH_LIMIT = 20      # fetch enough to find the exact-name match
+_BASE = "https://cathedral-ai.com"
+_MEMORY_CATEGORY = "identity"
+_MEMORY_IMPORTANCE = 0.9      # 0–1 float; high — identity-critical
+_SEARCH_LIMIT = 20
 _MAX_RETRIES = 2
+
+# Content sentinel: every ledger memory starts with this line so we can
+# reliably find it by prefix (Cathedral has no separate name field).
+_SENTINEL_PREFIX = "REFUSAL_LEDGER:"
 
 
 def _request(method: str, path: str, payload: Optional[dict], api_key: str) -> dict:
     url = f"{_BASE}{path}"
     data = json.dumps(payload, separators=(",", ":")).encode() if payload is not None else None
-    headers = {"X-API-Key": api_key}
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": "cathedral-constraint-field/0.2",
+    }
     if data is not None:
         headers["Content-Type"] = "application/json"
 
@@ -48,10 +55,9 @@ def _request(method: str, path: str, payload: Optional[dict], api_key: str) -> d
                 return json.loads(resp.read().decode())
         except _urlerr.HTTPError as e:
             body = e.read().decode(errors="replace")
-            # 4xx errors are caller errors — don't retry, surface them directly
             if 400 <= e.code < 500:
                 raise RuntimeError(
-                    f"Cathedral API {method} {path} → {e.code}"
+                    f"Cathedral API {method} {path} → {e.code}: {body}"
                 ) from e
             last_exc = RuntimeError(f"Cathedral API {method} {path} → {e.code}: {body}")
         except OSError as e:
@@ -72,7 +78,7 @@ class CathedralBridge:
                 "Cathedral API key required. Pass api_key= or set CATHEDRAL_API_KEY."
             )
         self.agent_id = agent_id
-        self._memory_name = f"refusal_ledger:{agent_id}"
+        self._sentinel = f"{_SENTINEL_PREFIX}{agent_id}"
 
     # ------------------------------------------------------------------
     # Public API
@@ -80,69 +86,61 @@ class CathedralBridge:
 
     def load_or_create(self) -> RefusalLedger:
         """Return the persisted ledger, or a fresh one if none exists."""
-        blob = self._fetch_ledger_blob()
-        if blob is None:
+        result = self._fetch_ledger()
+        if result is None:
             return RefusalLedger(agent_id=self.agent_id)
+        mem_id, blob = result
         try:
             ledger = RefusalLedger.load_full(blob)
         except Exception as exc:
             raise RuntimeError(
-                f"Ledger blob found in Cathedral but failed to parse: {exc}"
+                f"Ledger found in Cathedral (id={mem_id}) but failed to parse: {exc}"
             ) from exc
         if not ledger.verify_chain():
             raise RuntimeError(
-                "Recovered ledger has a broken hash chain — "
+                f"Recovered ledger (id={mem_id}) has a broken hash chain — "
                 "possible tampering or corruption. Refusing to use it."
             )
         return ledger
 
     def save(self, ledger: RefusalLedger) -> dict:
-        """Upsert the full ledger (including holdouts) into Cathedral memories.
+        """Upsert the full ledger into Cathedral memories.
 
-        Before saving, re-fetches the stored version and verifies the stored
-        chain is a prefix of the local chain, refusing on divergence to prevent
-        silent overwrites in concurrent-session scenarios.
+        Before saving, re-fetches the stored version and checks the stored
+        chain is a prefix of the local chain to guard against concurrent overwrites.
         """
         if not ledger.verify_chain():
             raise ValueError("Ledger hash chain is broken — refusing to persist corrupt state.")
 
-        existing_id = self._find_memory_id()
+        existing = self._fetch_ledger()
 
-        if existing_id:
-            # Concurrent-safety check: stored chain must be a prefix of local.
-            stored_blob = self._fetch_blob_by_id(existing_id)
-            if stored_blob:
-                try:
-                    stored = RefusalLedger.load_full(stored_blob)
-                    if stored.entries and not _is_prefix(stored, ledger):
-                        raise RuntimeError(
-                            f"Stored ledger ({len(stored.entries)} entries) diverges from "
-                            f"local ({len(ledger.entries)} entries). Resolve the conflict "
-                            "manually before saving."
-                        )
-                except RuntimeError:
-                    raise
-                except Exception:
-                    pass  # parse failure on stored — let save proceed and overwrite corrupt data
+        if existing:
+            mem_id, stored_blob = existing
+            try:
+                stored = RefusalLedger.load_full(stored_blob)
+                if stored.entries and not _is_prefix(stored, ledger):
+                    raise RuntimeError(
+                        f"Stored ledger ({len(stored.entries)} entries) diverges from "
+                        f"local ({len(ledger.entries)} entries). Resolve the conflict "
+                        "manually before saving."
+                    )
+            except RuntimeError:
+                raise
+            except Exception:
+                pass  # corrupt stored data — let save overwrite it
 
-            blob = self._compact_blob(ledger)
             return _request(
                 "PATCH",
-                f"/memories/{existing_id}",
-                {
-                    "content": blob,
-                    "importance": _MEMORY_IMPORTANCE,
-                },
+                f"/memories/{mem_id}",
+                {"content": self._encode(ledger)},
                 self.api_key,
             )
         else:
-            blob = self._compact_blob(ledger)
             return _request(
                 "POST",
                 "/memories",
                 {
-                    "name": self._memory_name,
-                    "content": blob,
+                    "content": self._encode(ledger),
                     "category": _MEMORY_CATEGORY,
                     "importance": _MEMORY_IMPORTANCE,
                 },
@@ -153,8 +151,7 @@ class CathedralBridge:
         """Take a Cathedral snapshot with refusal stats + chain head hash in the note.
 
         Note: Cathedral /snapshot and /drift operate on the whole account's
-        memory corpus, not just this agent's ledger. Keep that in mind when
-        reading drift scores if multiple agents share one API key.
+        memory corpus, not just this agent's ledger.
         """
         stats = self._ledger_stats(ledger)
         chain_head = ledger.entries[-1].entry_hash if ledger.entries else "empty"
@@ -166,8 +163,7 @@ class CathedralBridge:
     def drift(self) -> dict:
         """Return the current drift report from Cathedral.
 
-        Note: this reflects the entire account's memory corpus, not only
-        this agent's ledger.
+        Note: reflects the entire account's memory corpus, not only this agent's ledger.
         """
         return _request("GET", "/drift", None, self.api_key)
 
@@ -176,11 +172,8 @@ class CathedralBridge:
     # ------------------------------------------------------------------
 
     def _find_memory_id(self) -> Optional[str]:
-        """Search Cathedral for an existing ledger memory, return its ID or None.
-
-        Raises on auth/transport errors; only returns None for genuine absence.
-        """
-        query = _urlparse.quote(self._memory_name)
+        """Search for an existing ledger memory by sentinel prefix. Returns ID or None."""
+        query = _urlparse.quote(self._sentinel)
         result = _request(
             "GET",
             f"/memories?search={query}&limit={_SEARCH_LIMIT}",
@@ -188,28 +181,33 @@ class CathedralBridge:
             self.api_key,
         )
         for m in result.get("memories", []):
-            if m.get("name") == self._memory_name:
+            if m.get("content", "").startswith(self._sentinel + "\n"):
                 return m["id"]
         return None
 
-    def _fetch_blob_by_id(self, mem_id: str) -> Optional[str]:
-        try:
-            result = _request("GET", f"/memories/{mem_id}", None, self.api_key)
-            return result.get("content")
-        except Exception:
-            return None
-
-    def _fetch_ledger_blob(self) -> Optional[str]:
-        """Return the raw JSON blob stored in Cathedral, or None if absent."""
+    def _fetch_ledger(self) -> Optional[tuple[str, str]]:
+        """Return (memory_id, json_blob) if a ledger exists, else None."""
         mem_id = self._find_memory_id()
         if not mem_id:
             return None
-        return self._fetch_blob_by_id(mem_id)
+        result = _request("GET", f"/memories/{mem_id}", None, self.api_key)
+        content = result.get("memory", {}).get("content", "")
+        blob = self._decode(content)
+        if blob is None:
+            return None
+        return mem_id, blob
 
-    @staticmethod
-    def _compact_blob(ledger: RefusalLedger) -> str:
-        """Compact JSON serialisation — no indent, to minimise content size."""
-        return json.dumps(json.loads(ledger.export_full()), separators=(",", ":"))
+    def _encode(self, ledger: RefusalLedger) -> str:
+        """Sentinel-prefixed compact JSON for storage."""
+        compact = json.dumps(json.loads(ledger.export_full()), separators=(",", ":"))
+        return f"{self._sentinel}\n{compact}"
+
+    def _decode(self, content: str) -> Optional[str]:
+        """Strip sentinel prefix and return raw JSON, or None if malformed."""
+        prefix = self._sentinel + "\n"
+        if not content.startswith(prefix):
+            return None
+        return content[len(prefix):]
 
     @staticmethod
     def _ledger_stats(ledger: RefusalLedger) -> str:
@@ -232,7 +230,7 @@ class CathedralBridge:
 # ------------------------------------------------------------------
 
 def _is_prefix(stored: RefusalLedger, local: RefusalLedger) -> bool:
-    """True if stored.entries is a prefix of local.entries (by entry_id order)."""
+    """True if stored.entries is a prefix of local.entries (by entry_id + hash)."""
     if len(stored.entries) > len(local.entries):
         return False
     for s, l in zip(stored.entries, local.entries):
