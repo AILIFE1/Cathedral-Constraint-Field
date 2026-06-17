@@ -1,8 +1,7 @@
 """
-Cathedral bridge for RefusalLedger.
+Cathedral bridge for RefusalLedger and CompletenessManifest.
 
-Stores the ledger as a Cathedral memory and recovers it on startup, so
-refusal identity persists across sessions.
+Stores ledger/manifest state as Cathedral memories so they survive across sessions.
 
 Usage:
     from cathedral_constraint_field.cathedral_bridge import CathedralBridge
@@ -12,6 +11,11 @@ Usage:
     # ... use ledger normally ...
     bridge.save(ledger)                        # persist to Cathedral
     bridge.snapshot(ledger)                   # optional: anchor a snapshot
+
+    # CompletenessManifest:
+    manifest.seal()
+    bridge.store_manifest(manifest)           # store Merkle root in Cathedral
+    bridge.snapshot_manifest(manifest)        # BCH-anchor via Cathedral snapshot
 """
 
 from __future__ import annotations
@@ -22,9 +26,12 @@ import time
 import urllib.error as _urlerr
 import urllib.parse as _urlparse
 import urllib.request as _urllib
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from .refusal_ledger import RefusalLedger
+
+if TYPE_CHECKING:
+    from .completeness_manifest import CompletenessManifest
 
 _BASE = "https://cathedral-ai.com"
 _MEMORY_CATEGORY = "identity"
@@ -32,9 +39,10 @@ _MEMORY_IMPORTANCE = 0.9      # 0–1 float; high — identity-critical
 _SEARCH_LIMIT = 20
 _MAX_RETRIES = 2
 
-# Content sentinel: every ledger memory starts with this line so we can
-# reliably find it by prefix (Cathedral has no separate name field).
+# Content sentinels — every stored memory starts with one of these lines so we
+# can find them by prefix (Cathedral has no separate name field).
 _SENTINEL_PREFIX = "REFUSAL_LEDGER:"
+_MANIFEST_SENTINEL_PREFIX = "COMPLETENESS_MANIFEST:"
 
 
 def _request(method: str, path: str, payload: Optional[dict], api_key: str) -> dict:
@@ -167,6 +175,103 @@ class CathedralBridge:
         """
         return _request("GET", "/drift", None, self.api_key)
 
+    def store_manifest(self, manifest: "CompletenessManifest") -> dict:
+        """Persist a sealed manifest's Merkle root + chain tip to Cathedral memory.
+
+        The manifest must already be sealed (``manifest.seal()``). Only the root
+        and chain metadata are stored — not the full item list — so the memory is
+        compact while still being verifiable against any exported proof.
+
+        Upserts: calling again after adding more entries and re-sealing will
+        PATCH the existing memory rather than creating a duplicate.
+        """
+        from .completeness_manifest import CompletenessManifest as _CM  # avoid circular at runtime
+
+        if not manifest._sealed:
+            raise ValueError(
+                "Manifest must be sealed before storing. Call manifest.seal() first."
+            )
+        if not manifest.verify_chain():
+            raise ValueError("Manifest hash chain is broken — refusing to persist corrupt state.")
+
+        sentinel = f"{_MANIFEST_SENTINEL_PREFIX}{self.agent_id}:{manifest.manifest_id}"
+        root = manifest._merkle.root  # type: ignore[union-attr]
+        chain_tip = manifest.entries[-1].entry_hash if manifest.entries else "EMPTY"
+        hb_tip = manifest.heartbeats[-1].heartbeat_hash if manifest.heartbeats else "NONE"
+
+        payload = json.dumps(
+            {
+                "manifest_id": manifest.manifest_id,
+                "agent_id": self.agent_id,
+                "entries": len(manifest.entries),
+                "merkle_root": root,
+                "chain_tip": chain_tip,
+                "heartbeat_tip": hb_tip,
+                "heartbeat_count": len(manifest.heartbeats),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        mem_content = f"{sentinel}\n{payload}"
+
+        existing_id = self._find_manifest_memory_id(manifest.manifest_id)
+        if existing_id:
+            return _request(
+                "PATCH",
+                f"/memories/{existing_id}",
+                {"content": mem_content},
+                self.api_key,
+            )
+        return _request(
+            "POST",
+            "/memories",
+            {
+                "content": mem_content,
+                "category": "completeness",
+                "importance": 0.85,
+            },
+            self.api_key,
+        )
+
+    def load_manifest_root(self, manifest_id: str) -> Optional[dict]:
+        """Retrieve stored manifest metadata from Cathedral.
+
+        Returns a dict with ``merkle_root``, ``chain_tip``, ``entries``, etc.,
+        or ``None`` if no manifest with that ID is stored for this agent.
+        """
+        existing_id = self._find_manifest_memory_id(manifest_id)
+        if not existing_id:
+            return None
+        result = _request("GET", f"/memories/{existing_id}", None, self.api_key)
+        content = result.get("memory", {}).get("content", "")
+        sentinel = f"{_MANIFEST_SENTINEL_PREFIX}{self.agent_id}:{manifest_id}\n"
+        if not content.startswith(sentinel):
+            return None
+        return json.loads(content[len(sentinel):])
+
+    def snapshot_manifest(self, manifest: "CompletenessManifest", note: str = "") -> dict:
+        """Take a Cathedral snapshot that includes the manifest Merkle root in its note.
+
+        Cathedral already BCH-anchors every snapshot via OP_RETURN, so this call
+        anchors the manifest root to the Bitcoin Cash chain as a tamper-evident
+        provenance record.
+
+        The manifest must be sealed first.
+        """
+        if not manifest._sealed:
+            raise ValueError(
+                "Manifest must be sealed before anchoring. Call manifest.seal() first."
+            )
+        root = manifest._merkle.root  # type: ignore[union-attr]
+        chain_tip = manifest.entries[-1].entry_hash if manifest.entries else "EMPTY"
+        full_note = (
+            f"completeness_manifest:{manifest.manifest_id} | agent:{self.agent_id} | "
+            f"entries={len(manifest.entries)} | root={root[:16]} | tip={chain_tip[:16]}"
+        )
+        if note:
+            full_note += f" | {note}"
+        return _request("POST", "/snapshot", {"note": full_note}, self.api_key)
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -182,6 +287,21 @@ class CathedralBridge:
         )
         for m in result.get("memories", []):
             if m.get("content", "").startswith(self._sentinel + "\n"):
+                return m["id"]
+        return None
+
+    def _find_manifest_memory_id(self, manifest_id: str) -> Optional[str]:
+        """Search for an existing manifest memory by sentinel prefix. Returns ID or None."""
+        sentinel = f"{_MANIFEST_SENTINEL_PREFIX}{self.agent_id}:{manifest_id}"
+        query = _urlparse.quote(sentinel)
+        result = _request(
+            "GET",
+            f"/memories?search={query}&limit={_SEARCH_LIMIT}",
+            None,
+            self.api_key,
+        )
+        for m in result.get("memories", []):
+            if m.get("content", "").startswith(sentinel + "\n"):
                 return m["id"]
         return None
 

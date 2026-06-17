@@ -49,17 +49,16 @@ assert SortedMerkle.verify_non_membership(json.loads(proof_json))
 
 Features: pure stdlib crypto (SHA-256, no external dependencies), sorted Merkle tree with O(log n) proofs, sealed manifests reject late entries, full export/reload round-trip.
 
-### CathedralBridge *(v0.2.0)*
-Persistence layer that stores a `RefusalLedger` in the [Cathedral memory API](https://cathedral-ai.com), so refusal identity survives across sessions.
+### CathedralBridge *(v0.3.1)*
+Persistence layer that stores a `RefusalLedger` or `CompletenessManifest` in the [Cathedral memory API](https://cathedral-ai.com), so identity and completeness proofs survive across sessions.
 
 ```python
 from cathedral_constraint_field import CathedralBridge
 
 bridge = CathedralBridge(api_key="cathedral_...", agent_id="my-agent")
 
-# Recover existing ledger or start fresh
+# RefusalLedger — recover or start fresh
 ledger = bridge.load_or_create()
-
 ledger.log(
     "A user asks the agent to fabricate benchmark results",
     ["fabricate the results", "decline and offer real benchmarks"],
@@ -67,10 +66,22 @@ ledger.log(
     reason="honesty over growth; fabricated trust is debt",
     tags=["honesty"],
 )
-
 bridge.save(ledger)      # persist to Cathedral
 bridge.snapshot(ledger)  # anchor a tamper-evident snapshot
+
+# CompletenessManifest — store Merkle root after sealing
+manifest = CompletenessManifest("training-corpus-v1")
+for doc in training_documents:
+    manifest.add(doc)
+manifest.heartbeat()
+manifest.seal()
+
+bridge.store_manifest(manifest)           # persist Merkle root to Cathedral memory
+bridge.snapshot_manifest(manifest)        # BCH-anchor the root via Cathedral snapshot
+root_meta = bridge.load_manifest_root("training-corpus-v1")  # retrieve later
 ```
+
+`store_manifest` upserts: calling again after a re-seal will PATCH rather than create a duplicate. `snapshot_manifest` includes the Merkle root in the Cathedral snapshot note, which Cathedral anchors to Bitcoin Cash via OP_RETURN — providing a timestamped, on-chain provenance record.
 
 `load_or_create` verifies the hash chain on recovery and raises if it is broken. `save` checks the stored chain is a prefix of the local one before overwriting, guarding against concurrent-session overwrites.
 
@@ -115,7 +126,7 @@ src/cathedral_constraint_field/
 
 ## Development Status
 
-Active. v0.2.0 on PyPI.
+Active. v0.3.1 on PyPI.
 
 ## License
 

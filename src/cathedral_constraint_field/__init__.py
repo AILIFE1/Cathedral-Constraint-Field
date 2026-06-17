@@ -5,7 +5,7 @@ from .refusal_ledger import RefusalLedger
 from .cathedral_bridge import CathedralBridge
 from .completeness_manifest import CompletenessManifest, SortedMerkle
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 __all__ = [
     "ConstraintField",
